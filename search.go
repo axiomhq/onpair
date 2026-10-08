@@ -268,25 +268,61 @@ func (s *Searcher) RowsStartingWith(prefix []byte) []int {
 // transition table built once per call. Patterns longer than 65535 bytes are
 // rejected (KMP states are uint16).
 func (s *Searcher) RowsContaining(pattern []byte) ([]int, error) {
-	if len(pattern) > math.MaxUint16 {
-		return nil, fmt.Errorf("pattern length %d exceeds %d", len(pattern), math.MaxUint16)
+	q, err := s.Contains(pattern)
+	if err != nil {
+		return nil, err
 	}
-	var table containsTable
-	var b *containsBuilder
-	if len(pattern) > 0 {
-		b = s.newContainsBuilder(pattern)
-		table = containsTable{accept: uint16(len(pattern)), base: b.base, sparse: b.sparse, offsets: b.offsets}
-	}
+	defer q.Release()
 	var hits []int
 	for k := 0; k < s.archive.Rows(); k++ {
-		if table.matches(s.searchRowCodes(k)) {
+		if q.Matches(s.searchRowCodes(k)) {
 			hits = append(hits, k)
 		}
 	}
-	if b != nil {
-		s.builders.Put(b)
-	}
 	return hits, nil
+}
+
+// ContainsQuery is a substring pattern prepared for matching code streams of
+// the Searcher's dictionary: a token-level KMP transition table, so a row is
+// tested without decoding. It lets a caller test the rows it chooses, in the
+// row layout it keeps. Matches is safe for concurrent use; call Release once
+// done to return the table's scratch to the Searcher.
+type ContainsQuery struct {
+	s     *Searcher
+	b     *containsBuilder
+	table containsTable
+}
+
+// Contains prepares pattern for Matches. Patterns longer than 65535 bytes are
+// rejected (KMP states are uint16).
+func (s *Searcher) Contains(pattern []byte) (*ContainsQuery, error) {
+	if len(pattern) > math.MaxUint16 {
+		return nil, fmt.Errorf("pattern length %d exceeds %d", len(pattern), math.MaxUint16)
+	}
+	q := &ContainsQuery{s: s}
+	if len(pattern) > 0 {
+		q.b = s.newContainsBuilder(pattern)
+		q.table = containsTable{accept: uint16(len(pattern)), mask: q.b.mask, base: q.b.base, sparse: q.b.sparse, offsets: q.b.offsets}
+	}
+	return q, nil
+}
+
+// Matches reports whether codes decode to a string containing the pattern.
+// The codes are one row's tokens of the Searcher's dictionary (each below the
+// number of tokens, which Searcher checks for its own archive); any other
+// code gives an unspecified answer but never a panic.
+func (q *ContainsQuery) Matches(codes []uint16) bool {
+	return q.table.matches(codes)
+}
+
+// Release returns the query's scratch to its Searcher; the query must not be
+// used afterwards.
+func (q *ContainsQuery) Release() {
+	if q.b != nil {
+		q.s.builders.Put(q.b)
+		q.b = nil
+	}
+	q.table = containsTable{}
 }
 
 // containsTable is a token-level KMP transition table for one pattern: one
@@ -295,8 +331,11 @@ func (s *Searcher) RowsContaining(pattern []byte) ([]int, error) {
 // the pattern's failure chain transition differently, and the sorted
 // dictionary makes those tokens contiguous ranges, stored sparsely per state.
 // A state counts the leading pattern bytes matched; accept == len(pattern).
+// base has mask+1 entries, a power of two at least the number of tokens, and
+// codes index it through mask, so no code can index outside it.
 type containsTable struct {
 	accept  uint16
+	mask    uint16
 	base    []uint16
 	sparse  []sparseTransition
 	offsets []uint32 // offsets[s]..offsets[s+1] bounds state s's exceptions
@@ -322,17 +361,34 @@ func (t *containsTable) next(state, code uint16) uint16 {
 			}
 		}
 	}
-	return t.base[code]
+	return t.base[code&t.mask]
 }
 
 // matches reports whether codes contain the table's pattern as a substring.
+// In state 0 a code moves to base[code], so the codes whose base is 0 keep
+// the walk there: they are skipped four at a time with independent loads,
+// and only the codes that leave state 0 take the serial transition.
 func (t *containsTable) matches(codes []uint16) bool {
 	if t.accept == 0 {
 		return true // the empty pattern is a substring of everything
 	}
+	mask := t.mask
+	base := t.base[:int(mask)+1]
 	state := uint16(0)
-	for _, code := range codes {
-		state = t.next(state, code)
+	for k := 0; k < len(codes); k++ {
+		if state == 0 {
+			for k+4 <= len(codes) {
+				c := codes[k : k+4 : k+4]
+				if base[c[0]&mask]|base[c[1]&mask]|base[c[2]&mask]|base[c[3]&mask] != 0 {
+					break
+				}
+				k += 4
+			}
+			if k == len(codes) {
+				return false
+			}
+		}
+		state = t.next(state, codes[k])
 		if state == t.accept {
 			return true
 		}
@@ -352,7 +408,8 @@ func (s *Searcher) newContainsBuilder(pattern []byte) *containsBuilder {
 	b.s = s
 	b.p = pattern
 	b.fail = kmpFailure(pattern, b.fail)
-	b.base = resizeCleared(b.base, s.numTokens)
+	b.mask = tableMask(s.numTokens)
+	b.base = resizeCleared(b.base, int(b.mask)+1)
 	b.offsets = resizeSlice(b.offsets, m+1) // every entry but [0] is written below
 	b.offsets[0] = 0
 	b.sparse = b.sparse[:0]
@@ -364,6 +421,16 @@ func (s *Searcher) newContainsBuilder(pattern []byte) *containsBuilder {
 	b.basePass()
 	b.sparsePass()
 	return b
+}
+
+// tableMask is one less than the smallest power of two at least numTokens
+// (at most maxTokenID+1).
+func tableMask(numTokens int) uint16 {
+	n := 1
+	for n < numTokens {
+		n <<= 1
+	}
+	return uint16(n - 1)
 }
 
 // resizeSlice returns s with length n, reallocating only when cap(s) < n.
@@ -392,6 +459,7 @@ type containsBuilder struct {
 	p          []byte
 	fail       []uint16
 	dfa        [][256]uint16 // dense byte transitions per state; nil for long patterns
+	mask       uint16        // len(base)-1, see containsTable
 	base       []uint16
 	sparse     []sparseTransition
 	offsets    []uint32
@@ -486,7 +554,7 @@ func (b *containsBuilder) stepBytes(st uint16, data []byte) uint16 {
 // if table build ever dominates a real workload.
 func (b *containsBuilder) basePass() {
 	p0 := b.p[0]
-	for t := range b.base {
+	for t := range b.s.numTokens {
 		// State 0 only advances on the pattern's first byte, so jump straight
 		// past its first occurrence; without one the token cannot leave state 0.
 		tok := b.s.token(t)

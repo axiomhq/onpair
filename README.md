@@ -216,6 +216,7 @@ _ = out
 - `(*Searcher).RowsEqualTo(needle []byte) []int`
 - `(*Searcher).RowsStartingWith(prefix []byte) []int`
 - `(*Searcher).RowsContaining(pattern []byte) ([]int, error)`
+- `(*Searcher).Contains(pattern []byte) (*ContainsQuery, error)`, `(*ContainsQuery).Matches(codes []uint16) bool`, `(*ContainsQuery).Release()`: the substring table alone, for callers that keep their own row layout or test only some rows
 
 ### Serialization
 

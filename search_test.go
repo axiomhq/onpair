@@ -376,3 +376,32 @@ func TestRowsContainingConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// TestContainsQueryMatchesRowsAndAnyCodes checks ContainsQuery against
+// strings.Contains on rows the caller walks itself, and that codes outside
+// the dictionary, which a caller might pass, never panic.
+func TestContainsQueryMatchesRowsAndAnyCodes(t *testing.T) {
+	rows := searchCorpusURLs()
+	s, archive := mustSearcher(t, rows)
+	for _, needle := range []string{"google", "/", "https://www.", "zzz-absent", "a"} {
+		q, err := s.Contains([]byte(needle))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for k, row := range rows {
+			codes := archive.CompressedData[archive.StringBoundaries[k]:archive.StringBoundaries[k+1]]
+			if got, want := q.Matches(codes), strings.Contains(row, needle); got != want {
+				t.Fatalf("Matches(%q) on row %d %q = %v, want %v", needle, k, row, got, want)
+			}
+		}
+		wild := make([]uint16, 4096)
+		for i := range wild {
+			wild[i] = uint16(i * 37)
+		}
+		q.Matches(wild)
+		q.Release()
+	}
+	if _, err := s.Contains(make([]byte, 1<<16)); err == nil {
+		t.Fatal("a pattern over 65535 bytes was accepted")
+	}
+}
