@@ -596,7 +596,7 @@ func decodeFlatePayload(payload []byte) ([]byte, error) {
 	if err := r.(flate.Resetter).Reset(bytes.NewReader(payload), nil); err != nil {
 		return nil, err
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }() // a flate reader has nothing to flush; Reset clears its state for the pool
 
 	limited := io.LimitReader(r, maxStagePayloadBytes+1)
 	raw, err := io.ReadAll(limited)

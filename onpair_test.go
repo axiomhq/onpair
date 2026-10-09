@@ -33,7 +33,7 @@ func loadTestDataLines(filename string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }() // read only
 
 	var lines []string
 	scanner := bufio.NewScanner(file)

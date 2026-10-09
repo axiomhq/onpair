@@ -501,7 +501,7 @@ func looksUUIDToken(token []byte) bool {
 				return false
 			}
 		default:
-			if !((b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F')) {
+			if (b < '0' || b > '9') && (b < 'a' || b > 'f') && (b < 'A' || b > 'F') {
 				return false
 			}
 		}
