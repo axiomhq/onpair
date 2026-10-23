@@ -1149,6 +1149,8 @@ func verifyArchiveRoundTrip(t *testing.T, archive *Archive, rows []string) {
 	if string(loadedAll) != expectedAll {
 		t.Fatalf("round-trip mismatch: got %q want %q", string(loadedAll), expectedAll)
 	}
+	checkDecoder(t, archive, rows)
+	checkDecoder(t, &loaded, rows)
 }
 
 func FuzzArchiveRoundTrip(f *testing.F) {
