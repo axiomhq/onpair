@@ -1244,6 +1244,26 @@ func FuzzArchiveCorruptionPaths(f *testing.F) {
 		_, _ = archive.AppendAll(nil)
 		_, _ = archive.DecompressString(0, make([]byte, 64))
 		_, _ = archive.DecompressAllChecked(make([]byte, 64))
+		if decoder, err := archive.Decoder(); err == nil {
+			for row := range archive.Rows() {
+				want, err := archive.AppendRow(nil, row)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := decoder.AppendRow(nil, row)
+				if err != nil || !bytes.Equal(got, want) {
+					t.Fatalf("prepared row %d = %x, %v; want %x", row, got, err, want)
+				}
+			}
+			want, err := archive.AppendAll(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := decoder.AppendAll(nil)
+			if err != nil || !bytes.Equal(got, want) {
+				t.Fatalf("prepared bulk decode = %x, %v; want %x", got, err, want)
+			}
+		}
 	})
 }
 

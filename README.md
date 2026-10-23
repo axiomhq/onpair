@@ -97,6 +97,33 @@ if err != nil {
 fmt.Println(string(row))
 ```
 
+### Repeated reads without rescanning decoded lengths
+
+Prepare a decoder once when an archive will be read repeatedly:
+
+```go
+decoder, err := archive.Decoder()
+if err != nil {
+    panic(err)
+}
+row, err := decoder.AppendRow(nil, 42)
+if err != nil {
+    panic(err)
+}
+fmt.Println(string(row))
+```
+
+The decoder retains one `int` offset per row plus a terminal offset, not decoded
+strings. `DecodedLen` uses those offsets; `AppendRow` and `AppendAll` avoid a
+token-length pre-pass. Preparation checks the archive and requires row boundaries
+to cover the complete code stream. The wire format is unchanged.
+
+The decoder borrows the archive: do not mutate the archive or its backing slices
+while using it, and do not use archive storage as a destination buffer. Concurrent
+reads are safe with separate destination buffers. Appends may overwrite spare
+destination capacity beyond the returned length. Keep using the checked `Archive`
+methods for one-off reads where preparation would not be amortized.
+
 ### Strict decoding into caller buffers
 
 ```go
@@ -208,6 +235,10 @@ _ = out
 - `(*Archive).AppendAll(dst []byte) ([]byte, error)`
 - `(*Archive).DecompressString(index int, buffer []byte) (int, error)`
 - `(*Archive).DecompressAllChecked(buffer []byte) (int, error)`
+- `(*Archive).Decoder() (*Decoder, error)`
+- `(*Decoder).DecodedLen(index int) (int, error)`
+- `(*Decoder).AppendRow(dst []byte, index int) ([]byte, error)`
+- `(*Decoder).AppendAll(dst []byte) ([]byte, error)`
 
 ### Compressed-domain search
 
